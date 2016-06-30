@@ -2,39 +2,78 @@
 
 set -e
 
+mute() { $@ >/dev/null 2>&1; }
+die() { echo $@ ; exit 1; }
+
+# If no MongoDB then bail out
+#
+if [ -z "$PRITUNL_MONGODB_URI" ]; then
+  echo No MongoDB defined, aborting
+  exit 1
+fi
+
+# Make sure /dev/net is configured correctly
+#
 [ -d /dev/net ] ||
     mkdir -p /dev/net
 
 [ -c /dev/net/tun ] ||
     mknod /dev/net/tun c 10 200
 
-touch /var/log/pritunl.log
-touch /var/run/pritunl.pid
-/bin/rm /var/run/pritunl.pid
+# Make sure our tmp files are written to tmpfs and not overlay
+#
+mount -t tmpfs -o size=${TMPFS_SIZE:-512M} tmpfs /tmp
 
-if [ -z "$MONGODB_URI" ]; then
-  echo No MongoDB defined, aborting
-  exit 1
-fi
+# Simplify disabling web interface by binding to localhost rather than make user understand how to do that
+#
+[ -n "$NO_WEB" ] && PRITUNL_BIND_ADDR=127.0.0.1
 
-cat << EOF > /etc/pritunl.conf
+# Define where our state files are
+#
+TMP_PATH=/tmp/pritunl
+LOG_FILE=${TMP_PATH}/pritunl.log
+PID_FILE=${TMP_PATH}/pritunl.pid
+SETUP_KEY_FILE=${TMP_PATH}/pritunl.setup_key
+UUID_FILE=${TMP_PATH}/pritunl.uuid
+CONF_FILE=/etc/pritunl.conf
+
+test_file() {
+  [ -z "$1" ] && die test_file called without any params
+  mute mkdir -p $(dirname ${1})
+  touch ${1} || die Cant touch ${1}
+  if [ -n "$2" ]; then eval $2 $1; fi
+}
+
+test_file ${LOG_FILE}
+test_file ${PID_FILE} rm
+test_file ${CONF_FILE}
+test_file ${UUID_FILE}
+test_file ${SETUP_KEY_FILE}
+
+cat << EOF > ${CONF_FILE}
 {
-    "mongodb_uri": "$MONGODB_URI",
-    "server_key_path": "/var/lib/pritunl/pritunl.key",
-    "log_path": "/var/log/pritunl.log",
-    "static_cache": true,
-    "server_cert_path": "/var/lib/pritunl/pritunl.crt",
-    "temp_path": "/tmp/pritunl_%r",
-    "bind_addr": "0.0.0.0",
-    "debug": false,
-    "www_path": "/usr/share/pritunl/www",
-    "local_address_interface": "auto",
-    "port": 9700
+    "log_path": "${LOG_FILE}",
+    "setup_key_path": "${SETUP_KEY_FILE}",
+    "uuid_path": "${UUID_FILE}",
+
+    "var_run_path": "${TMP_PATH}",
+    "server_key_path": "${TMP_PATH}/pritunl.key",
+    "server_cert_path": "${TMP_PATH}/pritunl.crt",
+    "temp_path": "${TMP_PATH}",
+
+    "debug": ${PRITUNL_DEBUG:-false},
+    "port": ${PRITUNL_PORT:-9700},
+    "bind_addr": "${PRITUNL_BIND_ADDR:-0.0.0.0}",
+    "static_cache": ${PRITUNL_STATIC_CACHE:-true},
+    "mongodb_uri": "${PRITUNL_MONGODB_URI}",
+    "local_address_interface": "${PRITUNL_LOCAL_ADDRESS_INTERFACE:-auto}"
 }
 EOF
 
 stop_pritunl() {
-  pritunl_pid=$(cat /var/run/pritunl.pid)
+  # Get the running pid (once), then proceed to kill it and wait for termination
+  #
+  pritunl_pid=$(cat ${PID_FILE})
   echo Killing PriTunl pid=${pritunl_pid} cmdline=$(cat /proc/${pritunl_pid}/cmdline | tr '\0' ' ')
   kill ${pritunl_pid}
 
@@ -49,20 +88,25 @@ stop_pritunl() {
   exit 1
 }
 
-trap stop_pritunl SIGTERM INT
+# Setup our kill handler
+#
+trap stop_pritunl TERM INT
 
-/usr/bin/pritunl start --pidfile=/var/run/pritunl.pid --daemon
+# Launch the service as a daemon
+#
+/usr/bin/pritunl start --pidfile=${PID_FILE} --conf=${CONF_FILE} --daemon
 
 # Wait 5 seconds for process to start then get its PID
+#
 sleep 5
-pritunl_pid=$(cat /var/run/pritunl.pid)
+pritunl_pid=$(cat ${PID_FILE})
 echo PriTunl Started pid=${pritunl_pid} cmdline=$(cat /proc/${pritunl_pid}/cmdline | tr '\0' ' ')
 
-# If user gave us a command transfer control to it (breaks SIGTRAP)
+# If user gave us a command transfer control to it (breaks SIGTERM handler)
 #
 [ "$1" ] && exec "$@"
 
-# Otherwise tail the pritunl logs (for docker)
+# Otherwise tail the pritunl logs to stdout (without waiting on child, otherwise SIGTERM handler doesnt work)
 #
 /usr/bin/pritunl logs --tail &
 
@@ -70,3 +114,4 @@ echo PriTunl Started pid=${pritunl_pid} cmdline=$(cat /proc/${pritunl_pid}/cmdli
 # We can't sleep 60 because that prevents the trap from being handled, so sleep 1 reduces cycle
 #
 while [ -f /proc/${pritunl_pid}/stat ]; do sleep 1; done
+exit 0
