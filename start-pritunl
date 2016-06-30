@@ -1,8 +1,10 @@
-#!/bin/sh
+#!/bin/bash
+
 set -e
 
 [ -d /dev/net ] ||
     mkdir -p /dev/net
+
 [ -c /dev/net/tun ] ||
     mknod /dev/net/tun c 10 200
 
@@ -10,11 +12,9 @@ touch /var/log/pritunl.log
 touch /var/run/pritunl.pid
 /bin/rm /var/run/pritunl.pid
 
-## start a local mongodb instance if no mongodb specified through env
 if [ -z "$MONGODB_URI" ]; then
-  /usr/bin/mongod -f /etc/mongodb.conf &
-  sleep 70 ## for mongo to allocate journals
-  MONGODB_URI="mongodb://localhost:27017/pritunl"
+  echo No MongoDB defined, aborting
+  exit 1
 fi
 
 cat << EOF > /etc/pritunl.conf
@@ -33,6 +33,40 @@ cat << EOF > /etc/pritunl.conf
 }
 EOF
 
-/usr/bin/pritunl start &
+stop_pritunl() {
+  pritunl_pid=$(cat /var/run/pritunl.pid)
+  echo Killing PriTunl pid=${pritunl_pid} cmdline=$(cat /proc/${pritunl_pid}/cmdline | tr '\0' ' ')
+  kill ${pritunl_pid}
+
+  echo waiting for Server to exit
+  while [ -f /proc/${pritunl_pid}/stat ]; do
+    echo -n .
+    sleep 1
+  done
+
+  # Wait an extra 5 seconds for logs to update on DB
+  sleep 5
+  exit 1
+}
+
+trap stop_pritunl SIGTERM INT
+
+/usr/bin/pritunl start --pidfile=/var/run/pritunl.pid --daemon
+
+# Wait 5 seconds for process to start then get its PID
+sleep 5
+pritunl_pid=$(cat /var/run/pritunl.pid)
+echo PriTunl Started pid=${pritunl_pid} cmdline=$(cat /proc/${pritunl_pid}/cmdline | tr '\0' ' ')
+
+# If user gave us a command transfer control to it (breaks SIGTRAP)
+#
 [ "$1" ] && exec "$@"
 
+# Otherwise tail the pritunl logs (for docker)
+#
+/usr/bin/pritunl logs --tail &
+
+# prevent shell from exiting while the pritunl process is running
+# We can't sleep 60 because that prevents the trap from being handled, so sleep 1 reduces cycle
+#
+while [ -f /proc/${pritunl_pid}/stat ]; do sleep 1; done
