@@ -5,6 +5,12 @@ set -e
 mute() { $@ >/dev/null 2>&1; }
 die() { echo $@ ; exit 1; }
 
+# If the URI is google_metadata:// then fetch the details from metadata service
+#
+if [ "${PRITUNL_MONGODB_URI%%:*}" == "metadata_google" ]; then
+  PRITUNL_MONGODB_URI=$(curl -sSL -H 'Metadata-Flavor: Google' ${PRITUNL_MONGODB_URI/metadata_google/http} | base64 -d)
+fi
+
 # If no MongoDB then bail out
 #
 if [ -z "$PRITUNL_MONGODB_URI" ]; then
@@ -22,7 +28,7 @@ fi
 
 # Make sure our tmp files are written to tmpfs and not overlay
 #
-mount -t tmpfs -o size=${TMPFS_SIZE:-512M} tmpfs /tmp
+mount -t tmpfs -o size=${PRITUNL_TMPFS_SIZE:-512M} tmpfs /tmp
 
 # Simplify disabling web interface by binding to localhost rather than make user understand how to do that
 #
@@ -30,12 +36,16 @@ mount -t tmpfs -o size=${TMPFS_SIZE:-512M} tmpfs /tmp
 
 # Define where our state files are
 #
-TMP_PATH=/tmp/pritunl
-LOG_FILE=${TMP_PATH}/pritunl.log
-PID_FILE=${TMP_PATH}/pritunl.pid
-SETUP_KEY_FILE=${TMP_PATH}/pritunl.setup_key
-UUID_FILE=${TMP_PATH}/pritunl.uuid
-CONF_FILE=/etc/pritunl.conf
+PRITUNL_TMP_PATH=${PRITUNL_TMP_PATH:-/tmp/pritunl}
+PRITUNL_PERSIST_PATH=${PRITUNL_PERSIST_PATH:-/data/pritunl}
+
+PRITUNL_LOG_FILE=${PRITUNL_LOG_FILE:-${PRITUNL_TMP_PATH}/pritunl.log}
+PRITUNL_PID_FILE=${PRITUNL_PID_FILE:-${PRITUNL_TMP_PATH}/pritunl.pid}
+PRITUNL_SETUP_KEY_FILE=${PRITUNL_SETUP_KEY_FILE:-${PRITUNL_PERSIST_PATH}/pritunl.setup_key}
+PRITUNL_UUID_FILE=${PRITUNL_UUID_FILE:-${PRITUNL_PERSIST_PATH}/pritunl.uuid}
+PRITUNL_SERVER_KEY_FILE=${PRITUNL_SERVER_KEY_FILE:-${PRITUNL_PERSIST_PATH}/server.key}
+PRITUNL_SERVER_CRT_FILE=${PRITUNL_SERVER_CRT_FILE:-${PRITUNL_PERSIST_PATH}/server.crt}
+PRITUNL_CONF_FILE=/etc/pritunl.conf
 
 test_file() {
   [ -z "$1" ] && die test_file called without any params
@@ -44,22 +54,23 @@ test_file() {
   if [ -n "$2" ]; then eval $2 $1; fi
 }
 
-test_file ${LOG_FILE}
-test_file ${PID_FILE} rm
-test_file ${CONF_FILE}
-test_file ${UUID_FILE}
-test_file ${SETUP_KEY_FILE}
+mute mkdir -p ${PRITUNL_TMP_PATH}
+mute mkdir -p ${PRITUNL_PERSIST_PATH}
 
-cat << EOF > ${CONF_FILE}
+test_file ${PRITUNL_LOG_FILE}
+test_file ${PRITUNL_PID_FILE} rm
+test_file ${PRITUNL_CONF_FILE}
+
+cat << EOF > ${PRITUNL_CONF_FILE}
 {
-    "log_path": "${LOG_FILE}",
-    "setup_key_path": "${SETUP_KEY_FILE}",
-    "uuid_path": "${UUID_FILE}",
+    "log_path": "${PRITUNL_LOG_FILE}",
+    "setup_key_path": "${PRITUNL_SETUP_KEY_FILE}",
+    "uuid_path": "${PRITUNL_UUID_FILE}",
 
-    "var_run_path": "${TMP_PATH}",
-    "server_key_path": "${TMP_PATH}/pritunl.key",
-    "server_cert_path": "${TMP_PATH}/pritunl.crt",
-    "temp_path": "${TMP_PATH}",
+    "var_run_path": "${PRITUNL_TMP_PATH}",
+    "server_key_path": "${PRITUNL_SERVER_KEY_FILE}",
+    "server_cert_path": "${PRITUNL_SERVER_CRT_FILE}",
+    "temp_path": "${PRITUNL_TMP_PATH}",
 
     "debug": ${PRITUNL_DEBUG:-false},
     "port": ${PRITUNL_PORT:-9700},
@@ -73,7 +84,7 @@ EOF
 stop_pritunl() {
   # Get the running pid (once), then proceed to kill it and wait for termination
   #
-  pritunl_pid=$(cat ${PID_FILE})
+  pritunl_pid=$(cat ${PRITUNL_PID_FILE})
   echo Killing PriTunl pid=${pritunl_pid} cmdline=$(cat /proc/${pritunl_pid}/cmdline | tr '\0' ' ')
   kill ${pritunl_pid}
 
@@ -94,12 +105,12 @@ trap stop_pritunl TERM INT
 
 # Launch the service as a daemon
 #
-/usr/bin/pritunl start --pidfile=${PID_FILE} --conf=${CONF_FILE} --daemon
+/usr/bin/pritunl start --pidfile=${PRITUNL_PID_FILE} --conf=${PRITUNL_CONF_FILE} --daemon
 
 # Wait 5 seconds for process to start then get its PID
 #
 sleep 5
-pritunl_pid=$(cat ${PID_FILE})
+pritunl_pid=$(cat ${PRITUNL_PID_FILE})
 echo PriTunl Started pid=${pritunl_pid} cmdline=$(cat /proc/${pritunl_pid}/cmdline | tr '\0' ' ')
 
 # If user gave us a command transfer control to it (breaks SIGTERM handler)
