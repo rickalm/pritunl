@@ -1,0 +1,89 @@
+#!/bin/bash
+
+set -e
+
+mute() { $@ >/dev/null 2>&1; }
+die() { echo $@; exit 1; }
+
+test_file() {
+  [ -z "$1" ] && die test_file called without any params
+  mute mkdir -p $(dirname ${1})
+  touch ${1} || die Cant touch ${1}
+  if [ -n "$2" ]; then eval $2 $1; fi
+}
+
+# If the URI is google_metadata:// then fetch the details from metadata service
+#
+if [ "${PRITUNL_MONGODB_URI%%:*}" == "metadata_google" ]; then
+  PRITUNL_MONGODB_URI=$(curl -sSL -H 'Metadata-Flavor: Google' ${PRITUNL_MONGODB_URI/metadata_google/http} | base64 -d)
+fi
+
+# If no MongoDB then bail out
+#
+if [ -z "$PRITUNL_MONGODB_URI" ]; then
+  echo No MongoDB defined, aborting
+  exit 1
+fi
+
+# Make sure /dev/net is configured correctly
+#
+[ -d /dev/net ] || mkdir -p /dev/net
+[ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200
+
+# Make sure our tmp files are written to tmpfs and not overlay
+#
+mount -t tmpfs -o size=${PRITUNL_TMPFS_SIZE:-512M} tmpfs /tmp
+
+# Simplify disabling web interface by binding to localhost rather than make user understand how to do that
+#
+if [ -n "$NO_WEB" ]; then
+  PRITUNL_BIND_ADDR=127.0.0.1
+fi
+
+# Define where our state files are
+#
+PRITUNL_TMP_PATH=${PRITUNL_TMP_PATH:-/tmp/pritunl}
+PRITUNL_PERSIST_PATH=${PRITUNL_PERSIST_PATH:-/data/pritunl}
+
+# The command line option changing where the conf file is read from doesnt work currently
+#
+PRITUNL_CONF_FILE=/etc/pritunl.conf
+
+PRITUNL_LOG_FILE=${PRITUNL_LOG_FILE:-${PRITUNL_TMP_PATH}/pritunl.log}
+PRITUNL_UUID_FILE=${PRITUNL_UUID_FILE:-${PRITUNL_PERSIST_PATH}/pritunl.uuid}
+PRITUNL_SETUP_KEY_FILE=${PRITUNL_SETUP_KEY_FILE:-${PRITUNL_PERSIST_PATH}/pritunl.setup_key}
+PRITUNL_SERVER_KEY_FILE=${PRITUNL_SERVER_KEY_FILE:-${PRITUNL_PERSIST_PATH}/server.key}
+PRITUNL_SERVER_CRT_FILE=${PRITUNL_SERVER_CRT_FILE:-${PRITUNL_PERSIST_PATH}/server.crt}
+
+mute mkdir -p ${PRITUNL_TMP_PATH}
+mute mkdir -p ${PRITUNL_PERSIST_PATH}
+
+test_file ${PRITUNL_LOG_FILE}
+test_file ${PRITUNL_CONF_FILE}
+
+cat << EOF > ${PRITUNL_CONF_FILE}
+{
+    "debug": ${PRITUNL_DEBUG:-false},
+
+    "log_path": "${PRITUNL_LOG_FILE}",
+    "temp_path": "${PRITUNL_TMP_PATH}",
+    "var_run_path": "${PRITUNL_TMP_PATH}",
+
+    "uuid_path": "${PRITUNL_UUID_FILE}",
+    "setup_key_path": "${PRITUNL_SETUP_KEY_FILE}",
+
+    "server_key_path": "${PRITUNL_SERVER_KEY_FILE}",
+    "server_cert_path": "${PRITUNL_SERVER_CRT_FILE}",
+
+    "static_cache": ${PRITUNL_STATIC_CACHE:-true},
+    "mongodb_uri": "${PRITUNL_MONGODB_URI}",
+
+    "port": ${PRITUNL_PORT:-9700},
+    "bind_addr": "${PRITUNL_BIND_ADDR:-0.0.0.0}",
+    "local_address_interface": "${PRITUNL_LOCAL_ADDRESS_INTERFACE:-auto}"
+}
+EOF
+
+# Launch the service as a daemon
+#
+exec /usr/bin/pritunl start; # --conf=${PRITUNL_CONF_FILE}

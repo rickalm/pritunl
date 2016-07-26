@@ -5,6 +5,13 @@ set -e
 mute() { $@ >/dev/null 2>&1; }
 die() { echo $@ ; exit 1; }
 
+test_file() {
+  [ -z "$1" ] && die test_file called without any params
+  mute mkdir -p $(dirname ${1})
+  touch ${1} || die Cant touch ${1}
+  if [ -n "$2" ]; then eval $2 $1; fi
+}
+
 # If the URI is google_metadata:// then fetch the details from metadata service
 #
 if [ "${PRITUNL_MONGODB_URI%%:*}" == "metadata_google" ]; then
@@ -14,17 +21,13 @@ fi
 # If no MongoDB then bail out
 #
 if [ -z "$PRITUNL_MONGODB_URI" ]; then
-  echo No MongoDB defined, aborting
-  exit 1
+  die No MongoDB defined, aborting
 fi
 
 # Make sure /dev/net is configured correctly
 #
-[ -d /dev/net ] ||
-    mkdir -p /dev/net
-
-[ -c /dev/net/tun ] ||
-    mknod /dev/net/tun c 10 200
+[ -d /dev/net ] || mkdir -p /dev/net
+[ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200
 
 # Make sure our tmp files are written to tmpfs and not overlay
 #
@@ -32,7 +35,9 @@ mount -t tmpfs -o size=${PRITUNL_TMPFS_SIZE:-512M} tmpfs /tmp
 
 # Simplify disabling web interface by binding to localhost rather than make user understand how to do that
 #
-[ -n "$NO_WEB" ] && PRITUNL_BIND_ADDR=127.0.0.1
+if [ -n "$NO_WEB" ]; then
+  PRITUNL_BIND_ADDR=127.0.0.1
+fi
 
 # Define where our state files are
 #
@@ -47,18 +52,12 @@ PRITUNL_SERVER_KEY_FILE=${PRITUNL_SERVER_KEY_FILE:-${PRITUNL_PERSIST_PATH}/serve
 PRITUNL_SERVER_CRT_FILE=${PRITUNL_SERVER_CRT_FILE:-${PRITUNL_PERSIST_PATH}/server.crt}
 PRITUNL_CONF_FILE=/etc/pritunl.conf
 
-test_file() {
-  [ -z "$1" ] && die test_file called without any params
-  mute mkdir -p $(dirname ${1})
-  touch ${1} || die Cant touch ${1}
-  if [ -n "$2" ]; then eval $2 $1; fi
-}
 
 mute mkdir -p ${PRITUNL_TMP_PATH}
 mute mkdir -p ${PRITUNL_PERSIST_PATH}
 
+test_file ${PRITUNL_PID_FILE} rm; # If we leave an empty file behind scripts think process is running
 test_file ${PRITUNL_LOG_FILE}
-test_file ${PRITUNL_PID_FILE} rm
 test_file ${PRITUNL_CONF_FILE}
 
 cat << EOF > ${PRITUNL_CONF_FILE}
@@ -81,6 +80,9 @@ cat << EOF > ${PRITUNL_CONF_FILE}
 }
 EOF
 
+#
+# This is our helper function to make sure that PriTunl gets the Shutdown Signal
+#
 stop_pritunl() {
   # Get the running pid (once), then proceed to kill it and wait for termination
   #
@@ -96,20 +98,19 @@ stop_pritunl() {
 
   # Wait an extra 5 seconds for logs to update on DB
   sleep 5
-  exit 1
+  die stop_pritunl, done everything we could to exit
 }
-
-# Setup our kill handler
-#
-trap stop_pritunl TERM INT
 
 # Launch the service as a daemon
 #
 /usr/bin/pritunl start --pidfile=${PRITUNL_PID_FILE} --conf=${PRITUNL_CONF_FILE} --daemon
 
-# Wait 5 seconds for process to start then get its PID
+# Wait till PID file appears, then proceed
 #
-sleep 5
+while [ ! -f ${PRITUNL_PID_FILE} ]; do sleep 1; done
+
+# grab PID once, so we dont keep catting file
+#
 pritunl_pid=$(cat ${PRITUNL_PID_FILE})
 echo PriTunl Started pid=${pritunl_pid} cmdline=$(cat /proc/${pritunl_pid}/cmdline | tr '\0' ' ')
 
@@ -117,12 +118,16 @@ echo PriTunl Started pid=${pritunl_pid} cmdline=$(cat /proc/${pritunl_pid}/cmdli
 #
 [ "$1" ] && exec "$@"
 
-# Otherwise tail the pritunl logs to stdout (without waiting on child, otherwise SIGTERM handler doesnt work)
+# otherwise Setup our kill handler
+#
+trap stop_pritunl TERM INT
+
+# tail the pritunl logs to stdout so docker logs has something to report
+# backgrounded, otherwise SIGTERM handler doesnt work
 #
 /usr/bin/pritunl logs --tail &
 
 # prevent shell from exiting while the pritunl process is running
 # We can't sleep 60 because that prevents the trap from being handled, so sleep 1 reduces cycle
 #
-while [ -f /proc/${pritunl_pid}/stat ]; do sleep 1; done
-exit 0
+while [ -f /proc/${pritunl_pid}/stat ]; do sleep 1; done; exit 0

@@ -23,7 +23,7 @@ run:
 test: build
 	-docker kill pritunl
 	-docker rm pritunl
-	docker run -it --rm --privileged --net=host --name=pritunl -e "NO_WEB=true" -v "/var/lib/pritunl:/data" -e "PRITUNL_MONGODB_URI=${MONGODB_URI}" ${IMAGE_NAME}
+	docker run -it --rm --privileged --net=host --name=pritunl -e "NNO_WEB=true" -e "PRITUNL_DEBUG=false" -v "/var/lib/pritunl:/data" -e "PRITUNL_MONGODB_URI=${MONGODB_URI}" ${IMAGE_NAME}
 
 logs:
 	docker logs -f pritunl
